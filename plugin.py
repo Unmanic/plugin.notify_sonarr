@@ -74,7 +74,9 @@ class Settings(PluginSettings):
 
     def __set_limit_import_on_file_size(self):
         values = {
-            "label": "Limit file import size",
+            "label":       "Limit file import size",
+            "tooltip":     "Enable limiting the Sonarr notification on items over a set file size",
+            "sub_setting": True,
         }
         if self.get_setting('mode') != 'import_mode':
             values["display"] = 'hidden'
@@ -82,12 +84,14 @@ class Settings(PluginSettings):
 
     def __set_minimum_file_size(self):
         values = {
-            "label": "Minimum file size",
+            "label":       "Minimum file size",
+            "description": "Specify the minimum file size of a file that would trigger a notification",
+            "sub_setting": True,
         }
         if self.get_setting('mode') != 'import_mode':
             values["display"] = 'hidden'
-        if not self.get_setting('limit_import_on_file_size'):
-            values["display"] = 'hidden'
+        elif not self.get_setting('limit_import_on_file_size'):
+            values["display"] = 'disabled'
         return values
 
 
