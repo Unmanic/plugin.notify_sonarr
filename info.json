@@ -7,6 +7,9 @@
     "icon": "https://raw.githubusercontent.com/Josh5/unmanic.plugin.notify_sonarr/master/icon.png",
     "id": "notify_sonarr",
     "name": "Notify Sonarr",
+    "platform": [
+        "all"
+    ],
     "priorities": {
         "on_postprocessor_task_results": 0
     },
