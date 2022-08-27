@@ -21,12 +21,15 @@
         If not, see <https://www.gnu.org/licenses/>.
 
 """
+import json
 import logging
 import os
 import pprint
+import time
+
+import requests
 
 import humanfriendly
-from pyarr import SonarrAPI
 from unmanic.libs.unplugins.settings import PluginSettings
 
 # Configure plugin logger
@@ -88,6 +91,70 @@ class Settings(PluginSettings):
         return values
 
 
+class Session(object):
+    """
+    Rolling my own class for connecting to the Arr API.
+    Some Docker containers were giving issues with the session token when using pyarr.
+    We can just add apiKey=? to the URL for what we are doing here...
+    """
+
+    def __init__(self, host_url, api_key):
+        self.api_path = '/sonarr/api/v3'
+        self.host_url = host_url
+        self.api_key = api_key
+
+    @staticmethod
+    def __get(url, params=None):
+        headers = {
+            'Content-Type': 'application/json',
+        }
+        r = requests.get(url, headers=headers, params=params)
+        if r.status_code == 200:
+            return r.json()
+        return {}
+
+    @staticmethod
+    def __post(url, data=None):
+        headers = {
+            'Content-Type': 'application/json',
+        }
+        r = requests.post(url, headers=headers, json=data, timeout=5)
+        if r.status_code == 200:
+            return r.json()
+        return {}
+
+    def get_parsed_title(self, title):
+        # http://{host_url}/{api_path}}/parse?apiKey=1234567890&title=SomeTitle
+        path = "/parse"
+        params = {
+            "apiKey": self.api_key,
+            "title":  title,
+        }
+        url = "{host}{api}{path}".format(host=self.host_url.rstrip('/'), api=self.api_path, path=path)
+        return self.__get(url, params=params)
+
+    def get_queue(self):
+        # http://{host_url}/{api_path}}/queue?apiKey=1234567890&page=1&pageSize=9999
+        path = "/queue"
+        params = {
+            "apiKey":   self.api_key,
+            "page":     '1',
+            "pageSize": '9999',
+        }
+        url = "{host}{api}{path}".format(host=self.host_url.rstrip('/'), api=self.api_path, path=path)
+        return self.__get(url, params=params)
+
+    def post_command(self, name, **kwargs):
+        # http://{host_url}/{api_path}}/command?apiKey=1234567890
+        path = "/command?apiKey={api_key}".format(api_key=self.api_key)
+        data = {
+            "name": name,
+            **kwargs,
+        }
+        url = "{host}{api}{path}".format(host=self.host_url.rstrip('/'), api=self.api_path, path=path)
+        return self.__post(url, data=data)
+
+
 def check_file_size_under_max_file_size(path, minimum_file_size):
     file_stats = os.stat(os.path.join(path))
     if int(humanfriendly.parse_size(minimum_file_size)) < int(file_stats.st_size):
@@ -119,7 +186,6 @@ def update_mode(api, dest_path):
 
 def import_mode(api, source_path, dest_path):
     source_basename = os.path.basename(source_path)
-    abspath_string = dest_path.replace('\\', '')
 
     download_id = None
     episode_title = None
@@ -135,16 +201,17 @@ def import_mode(api, source_path, dest_path):
             break
 
     # Run import
+    logger.warning("Sending path '{}'".format(dest_path))
     if download_id:
         # Run API command for DownloadedEpisodesScan
-        #   - DownloadedEpisodesScan with a path and downloadClientId
-        logger.info("Queued import episode '{}' using downloadClientId: '{}'".format(episode_title, download_id))
-        result = api.post_command('DownloadedEpisodesScan', path=abspath_string, downloadClientId=download_id)
+        #   - DownloadedEpisodesScan with a path and download_client_id
+        logger.info("Queued import episode '{}' using download_client_id: '{}'".format(episode_title, download_id))
+        result = api.post_command('DownloadedEpisodesScan', path=dest_path, download_client_id=download_id)
     else:
-        # Run API command for DownloadedEpisodesScan without passing a downloadClientId
-        #   - DownloadedEpisodesScan with a path and downloadClientId
-        logger.info("Queued import using just the file path '{}'".format(abspath_string))
-        result = api.post_command('DownloadedEpisodesScan', path=abspath_string)
+        # Run API command for DownloadedEpisodesScan without passing a download_client_id
+        #   - DownloadedEpisodesScan with a path and download_client_id
+        logger.info("Queued import using just the file path '{}'".format(dest_path))
+        result = api.post_command('DownloadedEpisodesScan', path=dest_path)
 
     # Log results
     message = result
@@ -159,7 +226,7 @@ def import_mode(api, source_path, dest_path):
 
 
 def process_files(settings, source_file, destination_files, host_url, api_key):
-    api = SonarrAPI(host_url, api_key)
+    api = Session(host_url, api_key)
 
     mode = settings.get_setting('mode')
 
@@ -168,11 +235,12 @@ def process_files(settings, source_file, destination_files, host_url, api_key):
         if mode == 'update_mode':
             update_mode(api, dest_file)
         elif mode == 'import_mode':
-            minimum_file_size = settings.get_setting('minimum_file_size')
-            if check_file_size_under_max_file_size(dest_file, minimum_file_size):
-                # Ignore this file
-                logger.info("Ignoring file as it is under configured minimum size file: '{}'".format(dest_file))
-                continue
+            if settings.get_setting('limit_import_on_file_size'):
+                minimum_file_size = settings.get_setting('minimum_file_size')
+                if check_file_size_under_max_file_size(dest_file, minimum_file_size):
+                    # Ignore this file
+                    logger.info("Ignoring file as it is under configured minimum size file: '{}'".format(dest_file))
+                    continue
             import_mode(api, source_file, dest_file)
 
 
