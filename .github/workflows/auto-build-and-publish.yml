@@ -1,0 +1,207 @@
+name: Automatically build and publish this plugin
+
+on:
+  push:
+    branches:
+      - 'master'
+
+jobs:
+
+  build-and-publish-plugin:
+    runs-on: ubuntu-latest
+    name: Build and publish plugin
+    steps:
+
+    # Checkout plugin source
+    - name: Checkout plugin
+      uses: actions/checkout@v2
+      with:
+        path: plugin
+
+    # Checkout the official plugin repo templates
+    - name: Checkout official plugin repo templates branch
+      uses: actions/checkout@v2
+      with:
+        repository: Unmanic/unmanic-plugins
+        ref: template
+        path: template
+
+    # Prepare build environment
+    - name: Prepare build environment
+      id: prepare
+      run: |
+        # Copy generate repo script to scripts directory
+        cp -rfv ./template/scripts ./
+        if [ ! -e ./scripts/generate_repository.py ]; then
+            echo "Unable to build repo. Could not find generator script."
+            exit 1
+        fi
+
+        # Create dummy repo config
+        cat << EOF > config.json
+        {
+            "id": "repository.tmp",
+            "name": "Build Repo",
+            "icon": ""
+        }
+        EOF
+
+        # Read plugin id and version from info.json
+        plugin_id=$(cat plugin/info.json | jq -r .id)
+        plugin_version=$(cat plugin/info.json | jq -r .version)
+        echo ::set-output name=plugin_id::${plugin_id}
+        echo ::set-output name=plugin_version::${plugin_version}
+
+        # Install plugin into source directory for building
+        mkdir -p source/
+        mv -fv plugin source/${plugin_id}
+
+    # Setup python environment
+    - name: Set up Python 3.8
+      if: success()
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.8
+
+    # Setup node environment
+    - name: Set up node 16
+      uses: actions/setup-node@v2
+      with:
+        node-version: '16'
+
+    # Generate repo
+    - name: Generate repository from source
+      if: success()
+      id: generate_repo
+      run: |
+        cat ./source/${{ steps.prepare.outputs.plugin_id }}/info.json
+        python ./scripts/generate_repository.py
+
+    # Upload artifacts
+    - uses: actions/upload-artifact@v2
+      with:
+        name: plugin.${{ steps.prepare.outputs.plugin_id }}-v${{ steps.prepare.outputs.plugin_version }}
+        path: repo/**/*.zip
+
+    # Generate tagged release (should not be updated)
+    - uses: mukunku/tag-exists-action@v1.0.0
+      id: check_tag_exists
+      with: 
+        tag: ${{ steps.prepare.outputs.plugin_version }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: test check_tag_exists result
+      run: echo "RES - '${{ steps.check_tag_exists.outputs.exists }}' -"
+    - uses: ncipollo/release-action@v1
+      if: steps.check_tag_exists.outputs.exists == 'false'
+      with:
+        name: "Tagged Build: ${{ steps.prepare.outputs.plugin_version }}"
+        body: "Versioned release"
+        token: ${{ secrets.GITHUB_TOKEN }}
+        artifacts: repo/**/*.zip
+        generateReleaseNotes: true
+        allowUpdates: false
+        tag: ${{ steps.prepare.outputs.plugin_version }}
+        commit: master
+
+    # Generate latest development
+    - uses: ncipollo/release-action@v1
+      with:
+        name: "Development Build"
+        body: "Latest development release"
+        token: ${{ secrets.GITHUB_TOKEN }}
+        artifacts: repo/**/*.zip
+        generateReleaseNotes: true
+        allowUpdates: true
+        removeArtifacts: true
+        replacesArtifacts: true
+        tag: latest
+        commit: master
+        prerelease: true
+
+  generate-pr-in-official-repo:
+    runs-on: ubuntu-latest
+    name: Generate PR for official repo
+    permissions:
+      contents: write
+      actions: write
+      pull-requests: write
+    steps:
+
+    # Configure
+    - name: Prepare build environment
+      id: config
+      run: |
+        echo ::set-output name=dest_repo::Unmanic/unmanic-plugins
+        echo ::set-output name=dest_repo_branch::official
+        echo ::set-output name=workflow_run_link::$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+    # Checkout the destination plugin repo
+    - name: Checkout destination plugin repo
+      uses: actions/checkout@v2
+      with:
+        repository: ${{ steps.config.outputs.dest_repo }}
+        ref: ${{ steps.config.outputs.dest_repo_branch }}
+        fetch-depth: 0
+
+    # Checkout plugin source
+    - name: Checkout plugin
+      uses: actions/checkout@v2
+      with:
+        path: build/plugin
+
+    # Prepare build environment
+    - name: Prepare build environment
+      id: prepare
+      run: |
+        # Read plugin id and version from info.json
+        plugin_id=$(cat build/plugin/info.json | jq -r .id)
+        plugin_version=$(cat build/plugin/info.json | jq -r .version)
+        echo ::set-output name=plugin_id::${plugin_id}
+        echo ::set-output name=plugin_version::${plugin_version}
+
+        # Rename plugin directory for building
+        rm -rf build/plugin.${plugin_id}
+        mv -fv build/plugin build/plugin.${plugin_id}
+
+    # Configure git user for commit messages
+    - name: Configure git user
+      uses: fregante/setup-git-user@v1
+
+    # Check for plugin updates and create a PR branch with any changes found
+    - name: Generate PR branch
+      id: execute
+      run: |
+        # # Set the commit user/email
+        # git config --global user.email "${GITHUB_ACTOR}"
+        # git config --global user.name "${GITHUB_ACTOR}@users.noreply.github.com"
+        # Create plugin branch
+        ./.github/workflow_scripts/create_plugin_pr_branch.sh "${{ steps.prepare.outputs.plugin_id }}"
+        # Parse result
+        echo ::set-output name=result::$(cat ./result.txt)
+      shell: bash
+
+    # If a PR branch was created, force push branch to dest repo
+    - name: Push PR branch
+      if: steps.execute.outputs.result == 'success'
+      run: |
+        git config -l | grep 'http\..*\.extraheader' | cut -d= -f1 | xargs -L1 git config --unset-all
+        git push -f https://token:${GH_TOKEN}@github.com/${{ steps.config.outputs.dest_repo }}.git "pr-${{ steps.prepare.outputs.plugin_id }}"
+        # Add a small sleep here before running completing this job
+        sleep 2
+      env:
+        GH_TOKEN: "${{ secrets.GH_TOKEN }}"
+
+    # If a PR branch was created, open a PR (if one is not already open)
+    - name: Generate PR
+      if: steps.execute.outputs.result == 'success'
+      run: |
+        # Execute the 'gh pr create' command and exit quietly without error if the command fails
+        gh pr create \
+          --title "[${{ steps.prepare.outputs.plugin_id }}] v${{ steps.prepare.outputs.plugin_version }}" \
+          --body "PR automatically generated from [plugin source workflow](${{ steps.config.outputs.workflow_run_link }})" \
+          --base "${{ steps.config.outputs.dest_repo_branch }}" \
+          --head "pr-${{ steps.prepare.outputs.plugin_id }}" \
+          --repo "${{ steps.config.outputs.dest_repo }}" || true
+      env:
+        GITHUB_TOKEN: "${{ secrets.GH_TOKEN }}"
