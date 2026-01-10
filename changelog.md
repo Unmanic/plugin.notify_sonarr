@@ -1,4 +1,12 @@
 
+**<span style="color:#56adda">0.0.7</span>**
+- Ensure task was successful before notifying Sonarr
+- Improve path handling and error logging
+- Use full path for series identification to improve accuracy
+
+**<span style="color:#56adda">0.0.6</span>**
+- Maintenance release
+
 **<span style="color:#56adda">0.0.5</span>**
 - Update pyarr dependency to fix new Sonarr API v4 issues
 

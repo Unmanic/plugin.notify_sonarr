@@ -115,14 +115,18 @@ def check_file_size_under_max_file_size(path, minimum_file_size):
 def update_mode(api, dest_path, rename_files):
     basename = os.path.basename(dest_path)
 
-    # Fetch episode data
-    episode_data = api.get_parsed_title(basename)
+    # Fetch episode data. Try with full path first, then basename if that fails or returns nothing useful.
+    episode_data = api.get_parsed_title(dest_path)
+    if not episode_data or not episode_data.get('series'):
+        logger.debug("Failed to parse series info from full path '%s'. Trying with basename '%s'", dest_path, basename)
+        episode_data = api.get_parsed_title(basename)
 
     # Fetch a series ID from Sonarr
-    series_title = episode_data.get('series', {}).get('title')
-    series_id = episode_data.get('series', {}).get('id')
+    series_title = episode_data.get('series', {}).get('title') if episode_data else None
+    series_id = episode_data.get('series', {}).get('id') if episode_data else None
+
     if not series_id:
-        logger.error("Missing series ID. Failed to queued refresh of series for file: '%s'", dest_path)
+        logger.error("Missing series ID. Failed to queue refresh of series for file: '%s'", dest_path)
         return
 
     try:
@@ -134,96 +138,77 @@ def update_mode(api, dest_path, rename_files):
             logger.error("Response from sonarr: %s", result['message'])
             return
         else:
-            logger.info("Successfully queued refresh of the Series '%s' for file: '%s'", series_id, dest_path)
-    except PyarrUnauthorizedError:
-        logger.error("Failed to queue refresh of series ID '%s' for file: '%s'", series_id, dest_path)
-        logger.error("Unauthorized. Please ensure valid API Key is used.")
+            logger.info("Successfully queued refresh of the Series '%s' (ID: %s) for file: '%s'", series_title, series_id, dest_path)
+    except (PyarrUnauthorizedError, PyarrAccessRestricted, PyarrResourceNotFound, PyarrBadGateway, PyarrConnectionError) as err:
+        logger.error("Failed to queue refresh of series ID '%s' for file: '%s'. Error: %s", series_id, dest_path, str(err))
         return
-    except PyarrAccessRestricted:
-        logger.error("Failed to queue refresh of series ID '%s' for file: '%s'", series_id, dest_path)
-        logger.error("Access restricted. Please ensure API Key has correct permissions")
-        return
-    except PyarrResourceNotFound:
-        logger.error("Failed to queue refresh of series ID '%s' for file: '%s'", series_id, dest_path)
-        logger.error("Resource not found")
-        return
-    except PyarrBadGateway:
-        logger.error("Failed to queue refresh of series ID '%s' for file: '%s'", series_id, dest_path)
-        logger.error("Bad Gateway. Check your server is accessible")
-        return
-    except PyarrConnectionError:
-        logger.error("Failed to queued refresh of series ID '%s' for file: '%s'", series_id, dest_path)
-        logger.error("Timeout connecting to sonarr. Check your server is accessible")
+    except Exception as err:
+        logger.error("An unexpected error occurred while queuing refresh for series ID '%s': %s", series_id, str(err))
         return
 
     if rename_files:
+        logger.info("Waiting 10 seconds before triggering rename for series '%s'...", series_title)
         time.sleep(10) # Must give time (more than Radarr) for the refresh to complete before we run the rename.
         try:
             rename_list = api.get_episode_files_by_series_id(series_id)
             file_ids = [episode['id'] for episode in rename_list]
+            if not file_ids:
+                logger.warning("No episode files found to rename for series '%s' (ID: %s)", series_title, series_id)
+                return
             result = api.post_command('RenameFiles', seriesId=series_id, files=file_ids)
             if isinstance(result, dict):
                 logger.info("Successfully triggered rename of series '%s' for file: '%s'", series_title, dest_path)
             else:
-                logger.error("Failed to trigger rename of series ID '%s' for file: '%s'", series_id, dest_path)
-        except PyarrUnauthorizedError:
-            logger.error("Failed to trigger rename of series '%s' for file: '%s'", series_title, dest_path)
-            logger.error("Unauthorized. Please ensure valid API Key is used.")
-        except PyarrAccessRestricted:
-            logger.error("Failed to trigger rename of series '%s' for file: '%s'", series_title, dest_path)
-            logger.error("Access restricted. Please ensure API Key has correct permissions")
-        except PyarrResourceNotFound:
-            logger.error("Failed to trigger rename of series '%s' for file: '%s'", series_title, dest_path)
-            logger.error("Resource not found")
-        except PyarrBadGateway:
-            logger.error("Failed to trigger rename of series '%s' for file: '%s'", series_title, dest_path)
-            logger.error("Bad Gateway. Check your server is accessible")
-        except PyarrConnectionError:
-            logger.error("Failed to trigger rename of series '%s' for file: '%s'", series_title, dest_path)
-            logger.error("Timeout connecting to sonarr. Check your server is accessible")
-        except BaseException as err:
+                logger.error("Failed to trigger rename of series ID '%s' for file: '%s'. Result: %s", series_id, dest_path, str(result))
+        except (PyarrUnauthorizedError, PyarrAccessRestricted, PyarrResourceNotFound, PyarrBadGateway, PyarrConnectionError) as err:
+            logger.error("Failed to trigger rename of series '%s' for file: '%s'. Error: %s", series_title, dest_path, str(err))
+        except Exception as err:
             logger.error("Failed to trigger rename of series ID '%s' for file: '%s'\nError received: %s", series_id, dest_path, str(err))
 
 
 def import_mode(api, source_path, dest_path):
     source_basename = os.path.basename(source_path)
-    abspath_string = dest_path.replace('\\', '')
+    abspath_string = os.path.abspath(dest_path)
 
     download_id = None
     episode_title = None
 
-    queue = api.get_queue()
-    message = pprint.pformat(queue, indent=1)
-    logger.debug("Current queue \n%s", message)
-    for item in queue.get('records', []):
-        item_output_basename = os.path.basename(item.get('outputPath'))
-        if item_output_basename == source_basename:
-            download_id = item.get('downloadId')
-            episode_title = item.get('title')
-            break
+    try:
+        queue = api.get_queue()
+        message = pprint.pformat(queue, indent=1)
+        logger.debug("Current Sonarr queue: \n%s", message)
+        for item in queue.get('records', []):
+            item_output_basename = os.path.basename(item.get('outputPath', ''))
+            if item_output_basename == source_basename:
+                download_id = item.get('downloadId')
+                episode_title = item.get('title')
+                break
+    except Exception as err:
+        logger.error("Failed to fetch Sonarr queue: %s", str(err))
+        # Proceed anyway, we might still be able to trigger import by path
 
     # Run import
-    if download_id:
-        # Run API command for DownloadedEpisodesScan
-        #   - DownloadedEpisodesScan with a path and downloadClientId
-        logger.info("Queued import episode '%s' using downloadClientId: '%s'", episode_title, download_id)
-        result = api.post_command('DownloadedEpisodesScan', path=abspath_string, downloadClientId=download_id)
-    else:
-        # Run API command for DownloadedEpisodesScan without passing a downloadClientId
-        #   - DownloadedEpisodesScan with a path and downloadClientId
-        logger.info("Queued import using just the file path '%s'", abspath_string)
-        result = api.post_command('DownloadedEpisodesScan', path=abspath_string)
+    try:
+        if download_id:
+            # Run API command for DownloadedEpisodesScan
+            #   - DownloadedEpisodesScan with a path and downloadClientId
+            logger.info("Queued import episode '%s' using downloadClientId: '%s' for path '%s'", episode_title, download_id, abspath_string)
+            result = api.post_command('DownloadedEpisodesScan', path=abspath_string, downloadClientId=download_id)
+        else:
+            # Run API command for DownloadedEpisodesScan without passing a downloadClientId
+            #   - DownloadedEpisodesScan with a path and downloadClientId
+            logger.info("Queued import using just the file path '%s'", abspath_string)
+            result = api.post_command('DownloadedEpisodesScan', path=abspath_string)
 
-    # Log results
-    message = result
-    if isinstance(result, dict) or isinstance(result, list):
-        message = pprint.pformat(result, indent=1)
-    logger.debug("Queued import result \n%s", message)
-    if (isinstance(result, dict)) and result.get('message'):
-        logger.error("Failed to queued import of file: '%s'", dest_path)
-        return
-    # TODO: Check for other possible outputs
-    logger.info("Successfully queued import of file: '%s'", dest_path)
+        # Log results
+        if isinstance(result, dict) and result.get('message'):
+            logger.error("Failed to queue import of file: '%s'. Sonarr message: %s", dest_path, result['message'])
+            return
+        
+        logger.info("Successfully queued import of file in Sonarr: '%s'", dest_path)
+        logger.debug("Queued import result: %s", pprint.pformat(result, indent=1))
+    except Exception as err:
+        logger.error("Failed to queue import of file '%s' in Sonarr: %s", dest_path, str(err))
 
 
 def process_files(settings, source_file, destination_files, host_url, api_key):
@@ -266,6 +251,14 @@ def on_postprocessor_task_results(data):
     else:
         settings = Settings()
 
+    # Do nothing if the task was not successful
+    if not data.get('task_processing_success'):
+        logger.debug("Skipping notify_sonarr as the task was not successful.")
+        return
+    if not data.get('file_move_processes_success'):
+        logger.debug("Skipping notify_sonarr as the file move processes were not successful.")
+        return
+
     # Fetch destination and source files
     source_file = data.get('source_data', {}).get('abspath')
     destination_files = data.get('destination_files', [])
@@ -273,4 +266,9 @@ def on_postprocessor_task_results(data):
     # Setup API
     host_url = settings.get_setting('host_url')
     api_key = settings.get_setting('api_key')
+
+    if not api_key:
+        logger.error("Sonarr API Key is not configured. Skipping notification.")
+        return
+
     process_files(settings, source_file, destination_files, host_url, api_key)
