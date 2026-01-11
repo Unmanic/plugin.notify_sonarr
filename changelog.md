@@ -1,4 +1,9 @@
 
+**<span style="color:#56adda">0.0.8</span>**
+- Add support for receiving webhooks from Sonarr to trigger Unmanic tasks
+- Add dynamic library association settings for webhooks
+- Add debug logging for received webhooks
+
 **<span style="color:#56adda">0.0.7</span>**
 - Ensure task was successful before notifying Sonarr
 - Improve path handling and error logging
